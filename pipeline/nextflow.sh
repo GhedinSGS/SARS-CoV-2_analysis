@@ -1,12 +1,12 @@
 #! /bin/bash
-#SBATCH -o /path/to/output/messages/nextflow%j.txt
-#SBATCH -e /path/to/error/messages/nextflow-er%j.txt
+#SBATCH -o nextflow%j.txt
+#SBATCH -e nextflow-er%j.txt
 
 set -e
 
 // must have a conda virtual environment for dependencies
 // create one and change this path to locate it
-. /data/SGS/conda/etc/profile.d/conda.sh
+. conda/etc/profile.d/conda.sh
 conda activate
 
 // load and run nextflow
