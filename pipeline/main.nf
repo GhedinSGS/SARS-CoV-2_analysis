@@ -2,7 +2,7 @@
  *  Usage: nextflow run /path/to/main.nf
  *
  *  Original Author: Mohammed Khalfan < mkhalfan@nyu.edu >
- *  Adapter by: Allison Roder < roderae@nih.gov >
+ *  Adapted by: Allison Roder < roderae@nih.gov >
  *  NIAID, LPD, SGS Section
  */
 
@@ -11,7 +11,7 @@
 params.out = "${params.outdir}/out"
 params.tmpdir = "${params.outdir}/gatk_temp"
 // params.snpEff_config = "${workDir}/snpEff.config"
-params.snpEff_config = "/data/SGSlab/pipelines/covid/static/snpEff.config"
+params.snpEff_config = "static/snpEff.config"
 
 // Define modules here
 // Some modules missing on cluster may be available through conda virtual env
@@ -601,7 +601,7 @@ process qc {
 
     script:
     """
-    sbatch /data/SGSlab/pipelines/covid/bin/parse_metrics.sh ${sample_id} > ${sample_id}_report.csv 
+    sbatch bin/parse_metrics.sh ${sample_id} > ${sample_id}_report.csv 
     """
 }
 
