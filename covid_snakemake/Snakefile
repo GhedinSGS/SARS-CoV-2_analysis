@@ -1,0 +1,795 @@
+# NIH-COV2 Analysis Pipeline
+# Usage: snakemake -j200 -c4 --rerun-incomplete --use-envmodules --latency-wait 300 --cluster "sbatch --cpus-per-task=4 --chdir ./stderrout/"
+# 
+# Author: Matthew Chung < chungm6@nih.gov >
+# Laboratory of Parasitic Diseases, Systems Genomics Section, NIAID, NIH
+
+VERSION = 1.00
+
+configfile: "config.yaml"
+
+import re
+
+FASTQ, = glob_wildcards(config["params"]["reads"] + "/{ids}_R1_001.fastq.gz")
+FASTQ = [x for x in FASTQ if "Undetermined" not in x]
+
+SAMPLE = sorted(set([re.sub("[-_][AB]_.*", "", x) for x in FASTQ]))
+# SAMPLE = sorted(set([x for x in SAMPLE if "MD-NIH" in x]))
+# A_FASTQ = sorted(set([x for x in FASTQ if "-A_" in x]))
+# B_FASTQ = sorted(set([x for x in FASTQ if "-B_" in x]))
+
+# SAMPLES = [re.sub("-[AB].*", "", x) for x in IDS]
+# FASTQ_ID = [re.sub("_R[12].*", "", x) for x in IDS]
+print(SAMPLE)
+
+wildcard_constraints:
+    sample='|'.join([re.escape(x) for x in SAMPLE]),
+    primer='|'.join([re.escape(x) for x in ["A","B"]])
+
+rule all:
+    input:
+        # expand(config["params"]["output"] + "trimmed_fastq/{sample}.{primer}.R1.trimmed.fastq.gz",sample=SAMPLE,primer=["A","B"]),
+        # expand(config["params"]["output"] + "trimmed_fastq/{sample}.{primer}.R2.trimmed.fastq.gz",sample=SAMPLE,primer=["A","B"]),
+        # expand(config["params"]["output"] + "bwa_mem/{sample}.{primer}.bam",sample=SAMPLE,primer=["A","B"]),
+        expand(config["params"]["output"] + "merged/{sample}.fixed.ivar.rmdup.bam",sample=SAMPLE),
+        expand(config["params"]["output"] + "gatk_consensus/{sample}.gatk.fasta",sample=SAMPLE),
+        expand(config["params"]["output"] + "gatk-timo_consensus/{sample}.gatk-timo.fasta",sample=SAMPLE),
+        expand(config["params"]["output"] + "ivar_consensus/{sample}.ivar.fasta",sample=SAMPLE),
+        expand(config["params"]["output"] + "pilon_consensus/{sample}.pilon.fasta",sample=SAMPLE),
+        expand(config["params"]["output"] + "timo/coverage_plots/percentcov_10x.tsv",sample=SAMPLE),
+        config["params"]["output"] + "pipeline_done.txt"
+
+rule pool_fastqs:
+    params:
+        raw_fastq=config["params"]["reads"] + "{sample}",
+    output:
+        pooled_A_fastq_R1=config["params"]["output"] + "pooled_fastq/{sample}.A.R1.fastq.gz",
+        pooled_A_fastq_R2=config["params"]["output"] + "pooled_fastq/{sample}.A.R2.fastq.gz",
+        pooled_B_fastq_R1=config["params"]["output"] + "pooled_fastq/{sample}.B.R1.fastq.gz",
+        pooled_B_fastq_R2=config["params"]["output"] + "pooled_fastq/{sample}.B.R2.fastq.gz"
+    group: "upstream"
+    shell:
+        """
+        if [[ $(ls {params.raw_fastq}[-_]A_*R1* | wc -l) -lt 1 ]]; then
+            touch {output.pooled_A_fastq_R1}
+            touch {output.pooled_A_fastq_R2}
+        else
+            cat {params.raw_fastq}[-_]A_*R1* > {output.pooled_A_fastq_R1}
+            cat {params.raw_fastq}[-_]A_*R2* > {output.pooled_A_fastq_R2}
+        fi
+
+        if [[ $(ls {params.raw_fastq}[-_]B_*R1* | wc -l) -lt 1 ]]; then
+            touch {output.pooled_B_fastq_R1}
+            touch {output.pooled_B_fastq_R2}
+        else
+            cat {params.raw_fastq}[-_]B_*R1* > {output.pooled_B_fastq_R1}
+            cat {params.raw_fastq}[-_]B_*R2* > {output.pooled_B_fastq_R2}
+        fi
+
+        """
+
+rule trimmomatic_trim:
+    input:
+        adapters=config["params"]["adapters"],
+        pooled_fastq_R1=config["params"]["output"] + "pooled_fastq/{sample}.{primer}.R1.fastq.gz",
+        pooled_fastq_R2=config["params"]["output"] + "pooled_fastq/{sample}.{primer}.R2.fastq.gz",
+        primers_a=config["params"]["primers_a"],
+        primers_b=config["params"]["primers_b"]
+    params:
+        primer="{primer}"
+    output:
+       trimmed_fastq_R1=config["params"]["output"] + "trimmed_fastq/{sample}.{primer}.R1.trimmed.fastq.gz",
+       trimmed_fastq_R2=config["params"]["output"] + "trimmed_fastq/{sample}.{primer}.R2.trimmed.fastq.gz",
+       trimmed_fastq_R1_SE=config["params"]["output"] + "trimmed_fastq/{sample}.{primer}.R1.se.trimmed.fastq.gz",
+       trimmed_fastq_R2_SE=config["params"]["output"] + "trimmed_fastq/{sample}.{primer}.R2.se.trimmed.fastq.gz"
+    group: "upstream"
+    threads: 4
+    envmodules:
+        "java/12.0.1",
+        "trimmomatic/0.39"
+    shell:
+        """ 
+        if [[ {params.primer} = "A" ]]; then
+            TRIM_PRIMER_CMD=ILLUMINACLIP:{input.primers_a}:2:30:10:8:true
+        elif [[ {params.primer} = "B" ]]; then
+            TRIM_PRIMER_CMD=ILLUMINACLIP:{input.primers_b}:2:30:10:8:true
+        fi
+        trimmomatic PE \
+            -phred33 \
+            -threads {threads} \
+            {input.pooled_fastq_R1} \
+            {input.pooled_fastq_R2} \
+            {output.trimmed_fastq_R1} \
+            {output.trimmed_fastq_R1_SE}\
+            {output.trimmed_fastq_R2} \
+            {output.trimmed_fastq_R2_SE}\
+            ILLUMINACLIP:{input.adapters}:2:30:10:8:true \
+            $TRIM_PRIMER_CMD \
+            LEADING:20 TRAILING:20 SLIDINGWINDOW:4:20 MINLEN:20
+        """ 
+
+rule align:
+    input:
+        ref=config["params"]["ref"],
+        trimmed_fastq_R1=config["params"]["output"] + "trimmed_fastq/{sample}.{primer}.R1.trimmed.fastq.gz",
+        trimmed_fastq_R2=config["params"]["output"] + "trimmed_fastq/{sample}.{primer}.R2.trimmed.fastq.gz"
+    params:
+        readgroup="@RG\\tID:{sample}.{primer}\\tLB:{sample}.{primer}\\tPL:" + config["params"]["pl"] + "\\tPM:" + config["params"]["pm"] + "\\tSM:{sample}.{primer}",
+        output_prefix=config["params"]["output"] + "bwa_mem/{sample}.{primer}"
+    output:
+        bam=config["params"]["output"] + "bwa_mem/{sample}.{primer}.bam"
+    group: "upstream"
+    threads: 4
+    envmodules:
+        "bwa/0.7.17",
+        "java/12.0.1",
+        "picard/2.17.11"
+    shell:
+        """        
+        bwa mem \
+            -K 100000000 \
+            -v 3 \
+            -t {threads} \
+            -Y \
+            -R \"{params.readgroup}\" \
+            {input.ref} \
+            {input.trimmed_fastq_R1} {input.trimmed_fastq_R2} > {params.output_prefix}.sam
+
+        java -jar /usr/local/apps/picard/2.17.11/picard.jar SortSam \
+            I={params.output_prefix}.sam \
+            O={output.bam} \
+            SORT_ORDER=coordinate \
+            CREATE_INDEX=true
+
+        rm {params.output_prefix}.sam
+        """
+
+rule merge_bam:
+    input:
+        bam_a=config["params"]["output"] + "bwa_mem/{sample}.A.bam",
+        bam_b=config["params"]["output"] + "bwa_mem/{sample}.B.bam"
+    params:
+        sample="{sample}",
+        pl=config["params"]["pl"],
+        fcid=config["params"]["fcid"]
+    output:
+        bam_merged=config["params"]["output"] + "merged/{sample}.merged.bam",
+        bam_fixed=config["params"]["output"] + "merged/{sample}.fixed.bam"
+    group: "upstream"
+    threads: 4
+    envmodules:
+        "java/12.0.1",
+        "picard/2.17.11"
+    shell:
+        """
+        java -jar /usr/local/apps/picard/2.17.11/picard.jar MergeSamFiles \
+            I={input.bam_a} \
+            I={input.bam_b} \
+            O={output.bam_merged}
+
+        java -jar /usr/local/apps/picard/2.17.11/picard.jar AddOrReplaceReadGroups \
+            I={output.bam_merged} \
+            O={output.bam_fixed} \
+            RGID={params.sample} \
+            RGLB={params.sample} \
+            RGPL={params.pl} \
+            RGPU={params.fcid} \
+            RGSM={params.sample}
+        """
+
+rule ivar_trim:
+    input:
+        bam=config["params"]["output"] + "merged/{sample}.fixed.bam"
+    params:
+        bed=config["params"]["primers_bed"],
+        output_prefix=config["params"]["output"] + "merged/{sample}.fixed.ivar"
+    output:
+        bam=config["params"]["output"] + "merged/{sample}.fixed.ivar.bam"
+    group: "upstream"
+    threads: 4
+    envmodules:
+        "ivar/1.3.1",
+        "samtools/1.14"
+    shell:
+        """
+        ivar trim \
+            -e \
+            -i {input.bam} \
+            -b {params.bed} \
+            -p {params.output_prefix}
+
+        samtools view \
+            -h \
+            -q 20 \
+            {output.bam}| samtools sort \
+                -@ {threads} - > {params.output_prefix}.sorted.bam
+
+        mv {params.output_prefix}.sorted.bam {output.bam}
+
+        samtools index {output.bam} \
+            -@ {threads}
+        """
+
+rule rmdup_bam:
+    input:
+        bam=config["params"]["output"] + "merged/{sample}.fixed.ivar.bam"
+    output:
+        dedup_metrics=config["params"]["output"] + "merged/{sample}.dedup.metrics.txt",
+        bam=config["params"]["output"] + "merged/{sample}.fixed.ivar.rmdup.bam"
+    group: "upstream"
+    threads: 4
+    envmodules:
+        "java/12.0.1",
+        "picard/2.17.11",
+        "samtools/1.14"
+    shell:
+        """
+        java -jar /usr/local/apps/picard/2.17.11/picard.jar MarkDuplicates \
+            I={input.bam} \
+            M={output.dedup_metrics} \
+            O={output.bam} \
+            REMOVE_DUPLICATES=true
+        
+        samtools index {output.bam} \
+            -@ {threads}
+        """
+
+rule ivar_consensus:
+    input:
+        bam=config["params"]["output"] + "merged/{sample}.fixed.ivar.rmdup.bam"
+    params:
+        sample="{sample}",
+        cov_cutoff=config["params"]["cov_cutoff"],
+        output_prefix=config["params"]["output"] + "ivar_consensus/{sample}.ivar"
+    output:
+        fna=config["params"]["output"] + "ivar_consensus/{sample}.ivar.fasta"
+    group: "ivar"
+    threads:4
+    envmodules:
+        "ivar/1.3.1",
+        "samtools/1.14"
+    shell:
+        """
+        samtools mpileup \
+            -aa -A \
+            -d {params.cov_cutoff} {input.bam} | ivar consensus \
+                -p {params.output_prefix}
+
+        mv {params.output_prefix}.fa {output.fna}
+
+        sed -i "s/>.*/>{params.sample}/g" {output.fna}
+        """
+
+rule gatk_haplotypecaller:
+    input:
+        ref=config["params"]["ref"],
+        bam=config["params"]["output"] + "merged/{sample}.fixed.ivar.rmdup.bam"
+    output:
+        bam=config["params"]["output"] + "gatk_haplotypecaller/{sample}.haplotypecaller.bam",
+        vcf=config["params"]["output"] + "gatk_haplotypecaller/{sample}.haplotypecaller.vcf"
+    group: "gatk"
+    threads: 1
+    envmodules:
+        "java/12.0.1",
+        "GATK/4.2.4.1"
+    shell:
+        """
+        gatk --java-options "-Xmx50G" HaplotypeCaller \
+            -R {input.ref}\
+            -I {input.bam} \
+            -O {output.vcf} \
+            -bamout {output.bam} \
+            -ploidy 1
+        """
+
+rule gatk_getsnps:
+    input: 
+        ref=config["params"]["ref"],
+        vcf=config["params"]["output"] + "gatk_haplotypecaller/{sample}.haplotypecaller.vcf"
+    output:
+        raw_vcf=config["params"]["output"] + "gatk_vars/{sample}.haplotypecaller.raw_snps.vcf",
+        filtered_vcf=config["params"]["output"] + "gatk_vars/{sample}.haplotypecaller.filtered_snps.vcf"
+    group: "gatk"
+    threads: 1
+    envmodules:
+        "java/12.0.1",
+        "GATK/4.2.4.1"
+    shell:
+        """
+        gatk SelectVariants \
+            -R {input.ref} \
+            -V {input.vcf} \
+            -select-type SNP \
+            -O {output.raw_vcf}
+
+        gatk VariantFiltration \
+            -R {input.ref} \
+            -V {output.raw_vcf} \
+            -O {output.filtered_vcf} \
+            -filter-name "QD_filter" -filter "QD < 2.0" \
+            -filter-name "FS_filter" -filter "FS > 60.0" \
+            -filter-name "MQ_filter" -filter "MQ < 40.0" \
+            -filter-name "SOR_filter" -filter "SOR > 4.0" \
+            -filter-name "ReadPosRankSum_filter" -filter "ReadPosRankSum < -8.0"
+        """
+
+rule gatk_getindels:
+    input: 
+        ref=config["params"]["ref"],
+        vcf=config["params"]["output"] + "gatk_haplotypecaller/{sample}.haplotypecaller.vcf"
+    params:
+        cov_cutoff=config["params"]["cov_cutoff"]
+    output:
+        raw_vcf=config["params"]["output"] + "gatk_vars/{sample}.haplotypecaller.raw_indels.vcf",
+        filtered_vcf=config["params"]["output"] + "gatk_vars/{sample}.haplotypecaller.filtered_indels.vcf"
+    group: "gatk"
+    threads: 1
+    envmodules:
+        "java/12.0.1",
+        "GATK/4.2.4.1"
+    shell:
+        """
+        gatk SelectVariants \
+            -R {input.ref} \
+            -V {input.vcf} \
+            -select-type INDEL \
+            -O {output.raw_vcf}
+
+        gatk VariantFiltration \
+            -R {input.ref} \
+            -V {output.raw_vcf} \
+            -O {output.filtered_vcf} \
+            -filter-name "DP_filter" -filter "DP < {params.cov_cutoff}" \
+            -filter-name "QD_filter" -filter "QD < 2.0" \
+            -filter-name "FS_filter" -filter "FS > 200.0" \
+            -filter-name "SOR_filter" -filter "SOR > 10.0"
+        """
+
+rule gatk_consensus:
+    input:
+        ref=config["params"]["ref"],
+        bam=config["params"]["output"] + "merged/{sample}.fixed.ivar.rmdup.bam",
+        snp_vcf=config["params"]["output"] + "gatk_vars/{sample}.haplotypecaller.filtered_snps.vcf",
+        indel_vcf=config["params"]["output"] + "gatk_vars/{sample}.haplotypecaller.filtered_indels.vcf"
+    params:
+        sample="{sample}",
+        contig=config["timo_params"]["contig"],
+        cov_cutoff=config["params"]["cov_cutoff"]
+    output:
+        fna=config["params"]["output"] + "gatk_consensus/{sample}.gatk.fasta",
+        masked_fna=config["params"]["output"] + "gatk_vars/{sample}.gatk_snps.masked.fasta",
+        masked_dict=config["params"]["output"] + "gatk_vars/{sample}.gatk_snps.masked.dict",
+        snp_fna=config["params"]["output"] + "gatk_vars/{sample}.gatk_snps.fasta",
+        bed=config["params"]["output"] + "gatk_vars/{sample}_below_" + config["params"]["cov_cutoff"] + "_cov.bed"
+    group: "gatk"
+    threads: 4
+    envmodules:
+        "java/12.0.1",
+        "GATK/4.2.4.1",
+        "samtools/1.14",
+        "bedtools/2.30.0"
+    shell:
+        """
+        gatk FastaAlternateReferenceMaker \
+            -R {input.ref} \
+            -V {input.snp_vcf} \
+            -O {output.snp_fna}
+
+        sed -i "s/>.*/>{params.contig}/g" {output.snp_fna}
+
+        samtools view \
+            -bq 20 \
+            -F 1284 \
+            {input.bam} | bedtools genomecov \
+                -ibam stdin \
+                -bga | awk '$4<{params.cov_cutoff} {{print $1"\\t"$2"\\t"$3}}' > {output.bed}
+
+        bedtools maskfasta \
+            -fi {output.snp_fna} \
+            -bed {output.bed} \
+            -fo {output.masked_fna}
+
+        samtools faidx {output.masked_fna}
+
+        java -jar /usr/local/apps/picard/2.17.11/picard.jar CreateSequenceDictionary \
+            R={output.masked_fna} \
+            O={output.masked_dict}
+
+        gatk FastaAlternateReferenceMaker \
+            -R {output.masked_fna} \
+            -V {input.indel_vcf} \
+            -O {output.fna}
+
+        sed -i "s/>.*/>{params.sample}/g" {output.fna}
+        """
+
+
+rule pilon_getvars:
+    input:
+        ref=config["params"]["ref"],
+        bam=config["params"]["output"] + "merged/{sample}.fixed.ivar.rmdup.bam"
+    params:
+        sample="{sample}",
+        cov_cutoff=config["params"]["cov_cutoff"],
+        output_prefix=config["params"]["output"] + "pilon/{sample}.pilon_g"
+    output:
+        fna=config["params"]["output"] + "pilon/{sample}.raw.pilon.fasta",
+        vcf_raw=config["params"]["output"] + "pilon/{sample}.pilon_g.vcf",
+        vcf_filtered=config["params"]["output"] + "pilon/{sample}.pilon.vcf"
+    group: "pilon"
+    threads: 4
+    envmodules:
+        "java/12.0.1",
+        "pilon/1.23",
+        "GATK/4.2.4.1",
+        "bwa/0.7.17"
+    shell:
+        """
+        pilon \
+            --genome {input.ref} \
+            --bam {input.bam}\
+            --fix bases \
+            --changes \
+            --vcf \
+            --threads {threads} \
+            --mindepth {params.cov_cutoff} \
+            --output {params.output_prefix}
+        
+        gatk SelectVariants \
+            -V {output.vcf_raw}\
+            -O {output.vcf_filtered} \
+            --exclude-non-variants \
+            --exclude-filtered
+
+        mv {params.output_prefix}.fasta {output.fna}
+
+        sed -i "s/>.*/>{params.sample}/g" {output.fna}
+
+        bwa index {output.fna}
+        """
+
+rule pilon_realign:
+    priority: -1
+    input:
+        ref=config["params"]["output"] + "pilon/{sample}.raw.pilon.fasta",
+        trimmed_fastq_R1=config["params"]["output"] + "trimmed_fastq/{sample}.{primer}.R1.trimmed.fastq.gz",
+        trimmed_fastq_R2=config["params"]["output"] + "trimmed_fastq/{sample}.{primer}.R2.trimmed.fastq.gz"
+    params:
+        output_prefix=config["params"]["output"] + "pilon/{sample}.{primer}",
+        readgroup="@RG\\tID:{sample}.{primer}\\tLB:{sample}.{primer}\\tPL:" + config["params"]["pl"] + "\\tPM:" + config["params"]["pm"] + "\\tSM:{sample}.{primer}"
+    output:
+        bam=config["params"]["output"] + "pilon/{sample}.{primer}.bam"
+    group: "pilon"
+    threads: 4
+    envmodules:
+        "bwa/0.7.17",
+        "java/12.0.1",
+        "picard/2.17.11"
+    shell:
+        """
+        bwa mem \
+            -K 100000000 \
+            -v 3 \
+            -t {threads} \
+            -Y \
+            -R \"{params.readgroup}\" \
+            {input.ref} \
+            {input.trimmed_fastq_R1} {input.trimmed_fastq_R2} > {params.output_prefix}.sam
+
+        java -jar /usr/local/apps/picard/2.17.11/picard.jar SortSam \
+            I={params.output_prefix}.sam \
+            O={output.bam} \
+            SORT_ORDER=coordinate \
+            CREATE_INDEX=true
+
+        rm {params.output_prefix}.sam
+        """
+
+rule pilon_merge:
+    input:
+        bam_a=config["params"]["output"] + "pilon/{sample}.A.bam",
+        bam_b=config["params"]["output"] + "pilon/{sample}.B.bam"
+    params:
+        sample="{sample}",
+        pl=config["params"]["pl"],
+        fcid=config["params"]["fcid"]
+    output:
+        bam_merged=config["params"]["output"] + "pilon/{sample}.merged.bam",
+        bam_fixed=config["params"]["output"] + "pilon/{sample}.fixed.bam"
+    group: "pilon"
+    threads: 4
+    envmodules:
+        "java/12.0.1",
+        "picard/2.17.11"
+    shell:
+        """
+        java -jar /usr/local/apps/picard/2.17.11/picard.jar MergeSamFiles \
+            I={input.bam_a} \
+            I={input.bam_b} \
+            O={output.bam_merged}
+
+        java -jar /usr/local/apps/picard/2.17.11/picard.jar AddOrReplaceReadGroups \
+            I={output.bam_merged} \
+            O={output.bam_fixed} \
+            RGID={params.sample} \
+            RGLB={params.sample} \
+            RGPL={params.pl} \
+            RGPU={params.fcid} \
+            RGSM={params.sample}
+        """
+
+rule pilon_trim:
+    input:
+        bam=config["params"]["output"] + "pilon/{sample}.fixed.bam"
+    params:
+        bed=config["params"]["primers_bed"],
+        output_prefix=config["params"]["output"] + "pilon/{sample}.ivar"
+    output:
+        bam=config["params"]["output"] + "pilon/{sample}.ivar.bam"
+    group: "pilon"
+    threads: 4
+    envmodules:
+        "ivar/1.3.1",
+        "samtools/1.14"
+    shell:
+        """
+        ivar trim \
+            -e \
+            -i {input.bam} \
+            -b {params.bed} \
+            -p {params.output_prefix}
+
+        samtools view \
+            -h \
+            -q 20 \
+            {output.bam}| samtools sort \
+                -@ {threads} - > {params.output_prefix}.sorted.bam
+
+        mv {params.output_prefix}.sorted.bam {output.bam}
+
+        samtools index {output.bam} \
+            -@ {threads}
+        """
+
+rule pilon_rmdup:
+    input:
+        bam=config["params"]["output"] + "pilon/{sample}.ivar.bam"
+    output:
+        dedup_metrics=config["params"]["output"] + "pilon/{sample}.dedup.metrics.txt",
+        bam=config["params"]["output"] + "pilon/{sample}.ivar.rmdup.bam"
+    group: "pilon"
+    threads: 4
+    envmodules:
+        "java/12.0.1",
+        "picard/2.17.11",
+        "samtools/1.14"
+    shell:
+        """
+        java -jar /usr/local/apps/picard/2.17.11/picard.jar MarkDuplicates \
+            I={input.bam} \
+            M={output.dedup_metrics} \
+            O={output.bam} \
+            REMOVE_DUPLICATES=true
+        
+        samtools index {output.bam} \
+            -@ {threads}
+        """
+
+rule pilon_consensus:
+    input:
+        ref=config["params"]["output"] + "pilon/{sample}.raw.pilon.fasta",
+        bam=config["params"]["output"] + "pilon/{sample}.ivar.rmdup.bam",
+    params:
+        sample="{sample}",
+        cov_cutoff=config["params"]["cov_cutoff"]
+    output:
+        fna=config["params"]["output"] + "pilon_consensus/{sample}.pilon.fasta",
+        bed=config["params"]["output"] + "pilon/{sample}_below_" + config["params"]["cov_cutoff"] + "_cov.bed"
+    group: "pilon"
+    threads: 4
+    envmodules:
+        "samtools/1.14",
+        "bedtools/2.30.0"
+    shell:
+        """        
+        samtools view \
+            -bq 20 \
+            -F 1284 \
+            {input.bam} | bedtools genomecov \
+                -ibam stdin \
+                -bga | awk '$4<{params.cov_cutoff} {{print $1"\\t"$2"\\t"$3}}' > {output.bed}
+
+        bedtools maskfasta \
+            -fi {input.ref} \
+            -bed {output.bed} \
+            -fo {output.fna}
+
+        sed -i "s/>.*/>{params.sample}/g" {output.fna}
+        """
+
+rule timo:
+    priority: 1
+    input:
+        ref=config["params"]["ref"],
+        bam=config["params"]["output"] + "merged/{sample}.fixed.ivar.rmdup.bam"
+    params:
+        sample="{sample}",
+        cov_cutoff=config["params"]["cov_cutoff"],
+        freq_cutoff=config["timo_params"]["freq_cutoff"],
+        strain=config["timo_params"]["strain"],
+        contig=config["timo_params"]["contig"],
+        features=config["timo_params"]["features"],
+        output_dir=config["params"]["output"]
+    output:
+        aasnplist_csv=config["params"]["output"] + "timo/aasnplist/{sample}." + config["timo_params"]["strain"] + "." + config["timo_params"]["contig"] + "." + config["timo_params"]["freq_cutoff"] + ".aa.snplist.csv",
+        snplist_csv=config["params"]["output"] + "timo/fullvarlist/{sample}." + config["timo_params"]["strain"] + "." + config["timo_params"]["contig"] + ".Updated." + config["timo_params"]["freq_cutoff"] + ".snplist.csv",
+        cov = config["params"]["output"] + "timo/coverage/{sample}." + config["timo_params"]["strain"] + ".coverage.csv",
+        fna=config["params"]["output"] + "timo/consensus/{sample}." + config["params"]["cov_cutoff"] + "." + config["timo_params"]["strain"] + "." + config["timo_params"]["contig"] + ".fasta",
+        vcf=config["params"]["output"] + "timo/fullvarlist/{sample}." + config["timo_params"]["strain"] + "." + config["timo_params"]["contig"] + "." + config["timo_params"]["freq_cutoff"] + ".snplist.vcf"
+    group: "timo"
+    threads: 1
+    envmodules:
+        "python/3.8"
+    shell:
+        """
+        mkdir -p {params.output_dir}/timo/fullvarlist/
+        mkdir -p {params.output_dir}/timo/aasnplist
+
+        python3 /data/SGSlab/mchung/pipelines/covid_snakemake/timo/timo.v1.py \
+            --strain {params.strain} \
+            --infile {input.bam} \
+            --ref {input.ref} \
+            -o {params.output_dir}/timo/fullvarlist/{params.sample}/ \
+            --covercutoff {params.cov_cutoff} \
+            --cutoff {params.freq_cutoff}
+
+        mkdir -p {params.output_dir}/timo/consensus/{params.sample}/
+        mkdir -p {params.output_dir}/timo/coverage/{params.sample}/
+
+        python3 /data/SGSlab/mchung/pipelines/covid_snakemake/timo/ConsensusFasta.Coverage.v4.py \
+            --ref {input.ref} \
+            --cov {params.cov_cutoff} \
+            --minfreq {params.freq_cutoff} \
+            --var {params.output_dir}/timo/fullvarlist/{params.sample}/ \
+            --strain {params.strain} \
+            --savecov {params.output_dir}/timo/coverage/{params.sample}/ \
+            --savecon {params.output_dir}/timo/consensus/{params.sample}/
+
+        mkdir -p {params.output_dir}/timo/aasnplist/{params.sample}/
+
+        python3 /data/SGSlab/mchung/pipelines/covid_snakemake/timo/AddAminoGene.5.py \
+            --ref {input.ref} \
+            --freqcut {params.freq_cutoff} \
+            --var {params.output_dir}/timo/fullvarlist/{params.sample}/ \
+            --strain {params.strain} \
+            --save_dir {params.output_dir}/timo/aasnplist/{params.sample}/ \
+            --features {params.features}
+
+        rm -r {params.output_dir}/timo/consensus/{params.sample}/{params.contig}.{params.cov_cutoff}.{params.strain}.fasta
+
+        mv {params.output_dir}/timo/aasnplist/{params.sample}/* {params.output_dir}/timo/aasnplist/
+        mv {params.output_dir}/timo/consensus/{params.sample}/* {params.output_dir}/timo/consensus/
+        mv {params.output_dir}/timo/coverage/{params.sample}/{params.strain}.coverage.csv {params.output_dir}/timo/coverage/{params.sample}.{params.strain}.coverage.csv
+        mv {params.output_dir}/timo/fullvarlist/{params.sample}/* {params.output_dir}/timo/fullvarlist/
+
+        rm -r {params.output_dir}/timo/aasnplist/{params.sample}/
+        rm -r {params.output_dir}/timo/consensus/{params.sample}/
+        rm -r {params.output_dir}/timo/coverage/{params.sample}/
+        rm -r {params.output_dir}/timo/fullvarlist/{params.sample}/
+        
+        python3 /data/SGSlab/mchung/pipelines/covid_snakemake/timo/parse_tims_output.v2.py \
+            -r {input.ref} \
+            -v {params.output_dir}/timo/fullvarlist/{params.sample}.{params.strain}.{params.contig}.{params.freq_cutoff}.snplist.csv \
+            -o {params.output_dir}/timo/fullvarlist/{params.sample}.{params.strain}.{params.contig}.{params.freq_cutoff}.snplist.vcf
+        """
+
+rule timo_plotcov:
+    priority: 1
+    input:
+        cov=expand(config["params"]["output"] + "timo/coverage/{sample}." + config["timo_params"]["strain"] + ".coverage.csv",sample=SAMPLE)
+    params:
+        input_dir=config["params"]["output"] + "timo/coverage/",
+        output_dir=config["params"]["output"] + "timo/coverage_plots/",
+        cov_cutoff=config["params"]["cov_cutoff"]
+    output:
+        cov=config["params"]["output"] + "timo/coverage_plots/percentcov_10x.tsv"
+    threads: 1
+    envmodules:
+        "R/4.1.0"
+    shell:
+        """
+        /data/SGSlab/mchung/pipelines/covid_snakemake/scripts/plot_timo_cov.R -i={params.input_dir} -o={params.output_dir} -c={params.cov_cutoff}
+        """
+
+rule gatk_timo_consensus:
+    priority: 1
+    input:
+        fna=config["params"]["output"] + "timo/consensus/{sample}." + config["params"]["cov_cutoff"] + "." + config["timo_params"]["strain"] + "." + config["timo_params"]["contig"] + ".fasta",
+        indel_vcf=config["params"]["output"] + "gatk_vars/{sample}.haplotypecaller.filtered_indels.vcf"
+    params:
+        sample="{sample}",
+        contig=config["timo_params"]["contig"],
+        output_dir=config["params"]["output"]
+    output:
+        timo_fna=config["params"]["output"] + "timo_consensus/{sample}.timo.fasta",
+        timo_dict=config["params"]["output"] + "timo_consensus/{sample}.timo.dict",
+        fna=config["params"]["output"] + "gatk-timo_consensus/{sample}.gatk-timo.fasta"
+    threads: 4
+    envmodules: 
+        "java/12.0.1",
+        "picard/2.17.11",
+        "samtools/1.14",
+        "GATK/4.2.4.1"
+    shell:
+        """
+        sed "s/-/N/g" {input.fna} > {output.timo_fna}
+        sed -i "s/>.*/>{params.contig}/g" {output.timo_fna}
+
+        java -jar /usr/local/apps/picard/2.17.11/picard.jar CreateSequenceDictionary\
+            R={output.timo_fna} \
+            O={output.timo_dict}
+
+        samtools faidx {output.timo_fna}
+
+        gatk FastaAlternateReferenceMaker \
+            -R {output.timo_fna} \
+            -V {input.indel_vcf} \
+            -O {output.fna}
+
+        sed -i "s/>.*/>{params.sample}/g" {output.timo_fna}
+        sed -i "s/>.*/>{params.sample}/g" {output.fna}
+        """
+
+rule clean_up:
+    input:
+        fna1=expand(config["params"]["output"] + "gatk_consensus/{sample}.gatk.fasta",sample=SAMPLE),
+        fna2=expand(config["params"]["output"] + "gatk-timo_consensus/{sample}.gatk-timo.fasta",sample=SAMPLE),
+        fna3=expand(config["params"]["output"] + "ivar_consensus/{sample}.ivar.fasta",sample=SAMPLE),
+        fna4=expand(config["params"]["output"] + "pilon_consensus/{sample}.pilon.fasta",sample=SAMPLE)
+    params:
+        version=VERSION,
+        output_dir=config["params"]["output"]
+    output:
+        flag=config["params"]["output"] + "pipeline_done.txt"
+    threads: 1
+    shell:
+        """
+        rm -r {params.output_dir}/trimmed_fastq/
+        rm -r {params.output_dir}/bwa_mem/
+
+        rm {params.output_dir}/merged/*merged.bam*
+        rm {params.output_dir}/merged/*fixed.bam*
+        rm {params.output_dir}/merged/*fixed.ivar.bam*
+
+        rm {params.output_dir}/gatk_haplotypecaller/*bam
+        rm {params.output_dir}/gatk_haplotypecaller/*bai
+        rm {params.output_dir}/gatk_haplotypecaller/*vcf.idx
+
+        rm {params.output_dir}/gatk_vars/*bed
+        rm {params.output_dir}/gatk_vars/*idx
+        rm {params.output_dir}/gatk_vars/*gatk_snps*
+        rm {params.output_dir}/gatk_vars/*raw*
+
+        rm {params.output_dir}/pilon/*pilon_g*
+        rm {params.output_dir}/pilon/*idx
+        rm {params.output_dir}/pilon/*bed
+        rm {params.output_dir}/pilon/*bam*
+        rm {params.output_dir}/pilon/*bai
+        rm {params.output_dir}/pilon/*txt
+        rm {params.output_dir}/pilon/*fasta*
+
+        rm -r {params.output_dir}/timo/consensus
+        
+        rm {params.output_dir}/gatk_consensus/*fai
+        rm {params.output_dir}/gatk_consensus/*dict
+
+        rm {params.output_dir}/gatk-timo_consensus/*fai
+        rm {params.output_dir}/gatk-timo_consensus/*dict
+
+        rm {params.output_dir}/ivar_consensus/*ivar.qual.txt
+        
+        rm {params.output_dir}/timo_consensus/*fai
+        rm {params.output_dir}/timo_consensus/*dict
+
+        echo -e "Pipeline done v{params.version}" > {output.flag}
+        """
