@@ -11,8 +11,8 @@ Files/folders include:
 ## pipeline - 
   - contains all necessary files and scripts for trimming, alignment and variant calling of SARS-CoV-2 sequences. 
   - config file is the only file that needs editing in order to run the pipeline
-  - Usage is demonstrated at the top of the main.nf file
-  *(consensus sequences from this pipeline are not used. Run timo pipeline for consensus sequences)
+  - Usage is demonstrated at the top of the Snakefile (snakemake) file
+  *(many consensus sequences are generated from this pipeline. gatk-timo_consensus files are used most frequently)
 
 ## timo -
   - Full read me file with proper usage contained within timo folder. Also available at https://github.com/GhedinLab/timo
