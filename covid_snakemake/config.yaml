@@ -1,0 +1,19 @@
+---
+params:
+  reads: "/data/SGSlab/20220603/"
+  output: "/data/SGSlab/NIH-COV2/20220603/"
+  ref: "/data/SGSlab/reference_files/virus/sars2/SARS-CoV2.fa"
+  adapters: "/usr/local/apps/trimmomatic/Trimmomatic-0.36/adapters/NexteraPE-PE.fa"
+  primers_bed: "/data/SGSlab/NIH-COV2/primers/sars-cov2_nih_primer_scheme_20220331.bed"
+  primers_a: "/data/SGSlab/NIH-COV2/primers/20220331_A.fa"
+  primers_b: "/data/SGSlab/NIH-COV2/primers/20220324_B.fa"
+  pl: "illumina"
+  pm: "miseq"
+  fcid: "000000000-CP3RN"
+  cov_cutoff: "10"
+
+timo_params:
+  strain: "COV19"
+  contig: "NC_045512.2"
+  freq_cutoff: "0.001"
+  features: "/data/SGSlab/mchung/pipelines/covid_snakemake/timo/sars-cov-2-features.5.csv"
