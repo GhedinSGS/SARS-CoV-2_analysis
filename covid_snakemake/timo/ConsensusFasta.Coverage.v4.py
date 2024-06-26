@@ -98,7 +98,7 @@ def add_row(df,ntpos_list,segment,name):
         #generate new row of data
         new_row = {'name':name,'segment':segment,'ntpos':ntpos,'major':"N",'majorfreq':0,'minor':"",'minorfreq':"",'binocheck':"",'A':0,'C':0,'G':0,'T':0,'-':0,'totalcount':0,'aapos':"",'majoraa':"",'majorcodon':"",'minoraa':"",'minorcodon':""}
         #append to dataframe
-        df = df.append(new_row,ignore_index=True)
+        df = pd.concat([df,new_row],ignore_index=True)
 
     return df #return updated dataframe
 
@@ -174,7 +174,7 @@ for SEGMENT in refdict:
         covdf = ndf[['name','segment','ntpos','totalcount']]
 
         # append information to empty df (usefull if there are actual segments)
-        cdf = cdf.append(covdf)
+        cdf = pd.concat([cdf,covdf])
 
         # generate consensus
         # change any low coverage positions to 'N' for the major

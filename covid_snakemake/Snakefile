@@ -20,6 +20,8 @@ SAMPLE = sorted(set([re.sub("[-_][AB]_.*", "", x) for x in FASTQ]))
 
 # SAMPLES = [re.sub("-[AB].*", "", x) for x in IDS]
 # FASTQ_ID = [re.sub("_R[12].*", "", x) for x in IDS]
+
+print(FASTQ)
 print(SAMPLE)
 
 wildcard_constraints:
@@ -41,7 +43,7 @@ rule all:
 
 rule pool_fastqs:
     params:
-        raw_fastq=config["params"]["reads"] + "{sample}",
+        raw_fastq=config["params"]["reads"] + "{sample}"
     output:
         pooled_A_fastq_R1=config["params"]["output"] + "pooled_fastq/{sample}.A.R1.fastq.gz",
         pooled_A_fastq_R2=config["params"]["output"] + "pooled_fastq/{sample}.A.R2.fastq.gz",
@@ -94,7 +96,7 @@ rule trimmomatic_trim:
         elif [[ {params.primer} = "B" ]]; then
             TRIM_PRIMER_CMD=ILLUMINACLIP:{input.primers_b}:2:30:10:8:true
         fi
-        trimmomatic PE \
+        java -jar /usr/local/apps/trimmomatic/0.39/trimmomatic-0.39.jar PE \
             -phred33 \
             -threads {threads} \
             {input.pooled_fastq_R1} \
@@ -123,7 +125,7 @@ rule align:
     envmodules:
         "bwa/0.7.17",
         "java/12.0.1",
-        "picard/2.17.11"
+        "picard/2.22.2"
     shell:
         """        
         bwa mem \
@@ -135,7 +137,7 @@ rule align:
             {input.ref} \
             {input.trimmed_fastq_R1} {input.trimmed_fastq_R2} > {params.output_prefix}.sam
 
-        java -jar /usr/local/apps/picard/2.17.11/picard.jar SortSam \
+        picard SortSam \
             I={params.output_prefix}.sam \
             O={output.bam} \
             SORT_ORDER=coordinate \
@@ -159,15 +161,15 @@ rule merge_bam:
     threads: 4
     envmodules:
         "java/12.0.1",
-        "picard/2.17.11"
+        "picard/2.22.2"
     shell:
         """
-        java -jar /usr/local/apps/picard/2.17.11/picard.jar MergeSamFiles \
+        picard MergeSamFiles \
             I={input.bam_a} \
             I={input.bam_b} \
             O={output.bam_merged}
 
-        java -jar /usr/local/apps/picard/2.17.11/picard.jar AddOrReplaceReadGroups \
+        picard AddOrReplaceReadGroups \
             I={output.bam_merged} \
             O={output.bam_fixed} \
             RGID={params.sample} \
@@ -220,11 +222,11 @@ rule rmdup_bam:
     threads: 4
     envmodules:
         "java/12.0.1",
-        "picard/2.17.11",
+        "picard/2.22.2",
         "samtools/1.14"
     shell:
         """
-        java -jar /usr/local/apps/picard/2.17.11/picard.jar MarkDuplicates \
+        picard MarkDuplicates \
             I={input.bam} \
             M={output.dedup_metrics} \
             O={output.bam} \
@@ -252,7 +254,7 @@ rule ivar_consensus:
         """
         samtools mpileup \
             -aa -A \
-            -d {params.cov_cutoff} {input.bam} | ivar consensus \
+            -d 1000000 {input.bam} | ivar consensus \
                 -p {params.output_prefix}
 
         mv {params.output_prefix}.fa {output.fna}
@@ -326,7 +328,8 @@ rule gatk_getindels:
     threads: 1
     envmodules:
         "java/12.0.1",
-        "GATK/4.2.4.1"
+        "GATK/4.2.4.1",
+        "python/3.9"
     shell:
         """
         gatk SelectVariants \
@@ -367,7 +370,8 @@ rule gatk_consensus:
         "java/12.0.1",
         "GATK/4.2.4.1",
         "samtools/1.14",
-        "bedtools/2.30.0"
+        "bedtools/2.30.0",
+        "picard/2.22.2"
     shell:
         """
         gatk FastaAlternateReferenceMaker \
@@ -391,7 +395,7 @@ rule gatk_consensus:
 
         samtools faidx {output.masked_fna}
 
-        java -jar /usr/local/apps/picard/2.17.11/picard.jar CreateSequenceDictionary \
+        picard CreateSequenceDictionary \
             R={output.masked_fna} \
             O={output.masked_dict}
 
@@ -464,7 +468,7 @@ rule pilon_realign:
     envmodules:
         "bwa/0.7.17",
         "java/12.0.1",
-        "picard/2.17.11"
+        "picard/2.22.2"
     shell:
         """
         bwa mem \
@@ -476,7 +480,7 @@ rule pilon_realign:
             {input.ref} \
             {input.trimmed_fastq_R1} {input.trimmed_fastq_R2} > {params.output_prefix}.sam
 
-        java -jar /usr/local/apps/picard/2.17.11/picard.jar SortSam \
+        picard SortSam \
             I={params.output_prefix}.sam \
             O={output.bam} \
             SORT_ORDER=coordinate \
@@ -500,15 +504,15 @@ rule pilon_merge:
     threads: 4
     envmodules:
         "java/12.0.1",
-        "picard/2.17.11"
+        "picard/2.22.2"
     shell:
         """
-        java -jar /usr/local/apps/picard/2.17.11/picard.jar MergeSamFiles \
+        picard MergeSamFiles \
             I={input.bam_a} \
             I={input.bam_b} \
             O={output.bam_merged}
 
-        java -jar /usr/local/apps/picard/2.17.11/picard.jar AddOrReplaceReadGroups \
+        picard AddOrReplaceReadGroups \
             I={output.bam_merged} \
             O={output.bam_fixed} \
             RGID={params.sample} \
@@ -561,11 +565,11 @@ rule pilon_rmdup:
     threads: 4
     envmodules:
         "java/12.0.1",
-        "picard/2.17.11",
+        "picard/2.22.2",
         "samtools/1.14"
     shell:
         """
-        java -jar /usr/local/apps/picard/2.17.11/picard.jar MarkDuplicates \
+        picard MarkDuplicates \
             I={input.bam} \
             M={output.dedup_metrics} \
             O={output.bam} \
@@ -629,7 +633,7 @@ rule timo:
     group: "timo"
     threads: 1
     envmodules:
-        "python/3.8"
+        "python/3.10"
     shell:
         """
         mkdir -p {params.output_dir}/timo/fullvarlist/
@@ -695,7 +699,7 @@ rule timo_plotcov:
         cov=config["params"]["output"] + "timo/coverage_plots/percentcov_10x.tsv"
     threads: 1
     envmodules:
-        "R/4.1.0"
+        "R/4.3.0"
     shell:
         """
         /data/SGSlab/mchung/pipelines/covid_snakemake/scripts/plot_timo_cov.R -i={params.input_dir} -o={params.output_dir} -c={params.cov_cutoff}
@@ -717,7 +721,7 @@ rule gatk_timo_consensus:
     threads: 4
     envmodules: 
         "java/12.0.1",
-        "picard/2.17.11",
+        "picard/2.22.2",
         "samtools/1.14",
         "GATK/4.2.4.1"
     shell:
@@ -725,7 +729,7 @@ rule gatk_timo_consensus:
         sed "s/-/N/g" {input.fna} > {output.timo_fna}
         sed -i "s/>.*/>{params.contig}/g" {output.timo_fna}
 
-        java -jar /usr/local/apps/picard/2.17.11/picard.jar CreateSequenceDictionary\
+        picard CreateSequenceDictionary\
             R={output.timo_fna} \
             O={output.timo_dict}
 
